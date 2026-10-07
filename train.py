@@ -16,6 +16,11 @@ Features:
 
 import os
 import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import glob
 import time
 import json
@@ -397,7 +402,10 @@ def train():
     criterion = nn.BCELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    if hasattr(torch.amp, 'GradScaler'):
+        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     start_epoch = 1
     best_val_loss = float('inf')
@@ -433,10 +441,17 @@ def train():
             targets = targets.to(device, non_blocking=True)
             optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            if hasattr(torch.amp, 'autocast'):
+                autocast_ctx = torch.amp.autocast('cuda', enabled=use_amp)
+            else:
+                autocast_ctx = torch.cuda.amp.autocast(enabled=use_amp)
+
+            with autocast_ctx:
                 outputs = model(inputs).squeeze(1)
-                outputs = torch.clamp(outputs, 1e-7, 1.0 - 1e-7)
-                loss = criterion(outputs, targets)
+
+            # Compute BCELoss in FP32 outside autocast to prevent float16 underflow/overflow
+            outputs = torch.clamp(outputs.float(), 1e-7, 1.0 - 1e-7)
+            loss = criterion(outputs, targets)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -470,10 +485,16 @@ def train():
                 inputs = inputs.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
 
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                if hasattr(torch.amp, 'autocast'):
+                    autocast_ctx = torch.amp.autocast('cuda', enabled=use_amp)
+                else:
+                    autocast_ctx = torch.cuda.amp.autocast(enabled=use_amp)
+
+                with autocast_ctx:
                     outputs = model(inputs).squeeze(1)
-                    outputs = torch.clamp(outputs, 1e-7, 1.0 - 1e-7)
-                    loss = criterion(outputs, targets)
+
+                outputs = torch.clamp(outputs.float(), 1e-7, 1.0 - 1e-7)
+                loss = criterion(outputs, targets)
 
                 val_loss += loss.item() * inputs.size(0)
                 preds = (outputs >= 0.5).float()
@@ -519,7 +540,7 @@ def train():
                 'val_loss': best_val_loss,
                 'val_acc': best_val_acc,
             }, best_weights_path)
-            print(f"  >>> ⭐ NEW BEST MODEL SAVED to '{best_weights_path}' (Val Loss: {best_val_loss:.4f}, Val Acc: {best_val_acc*100:.2f}%)\n")
+            print(f"  >>> [BEST] NEW BEST MODEL SAVED to '{best_weights_path}' (Val Loss: {best_val_loss:.4f}, Val Acc: {best_val_acc*100:.2f}%)\n")
 
     print("\n" + "=" * 65)
     print("  TRAINING COMPLETE!")
