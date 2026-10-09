@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Crime Detection System — Dashboard</title>
+  <meta name="description" content="Real-time AI-powered crime and anomaly detection dashboard for live CCTV and uploaded surveillance footage." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    /* ─── Reset & Base ─────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg-0: #070b14;
+      --bg-1: #0d1422;
+      --bg-2: #111827;
+      --bg-3: #1a2235;
+      --bg-card: #141c2e;
+      --border: rgba(99,120,180,0.18);
+      --border-glow: rgba(99,174,255,0.35);
+      --accent-blue: #3b82f6;
+      --accent-cyan: #06b6d4;
+      --accent-purple: #8b5cf6;
+      --safe: #22c55e;
+      --caution: #f97316;
+      --danger: #ef4444;
+      --text-1: #f1f5f9;
+      --text-2: #94a3b8;
+      --text-3: #64748b;
+      --glow-blue: 0 0 24px rgba(59,130,246,0.25);
+      --glow-danger: 0 0 24px rgba(239,68,68,0.35);
+      --glow-safe: 0 0 20px rgba(34,197,94,0.25);
+      --radius: 12px;
+      --radius-sm: 8px;
+      --transition: 0.2s ease;
+    }
+    html, body { height: 100%; background: var(--bg-0); color: var(--text-1); font-family: 'Inter', sans-serif; font-size: 14px; line-height: 1.6; overflow-x: hidden; }
+    ::selection { background: rgba(59,130,246,0.35); }
+    ::-webkit-scrollbar { width: 5px; } ::-webkit-scrollbar-track { background: var(--bg-1); } ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 4px; }
+
+    /* ─── Animated Background Grid ─────────────────────────────── */
+    body::before {
+      content: '';
+      position: fixed; inset: 0; z-index: 0;
+      background-image: linear-gradient(rgba(59,130,246,0.04) 1px, transparent 1px),
+                        linear-gradient(90deg, rgba(59,130,246,0.04) 1px, transparent 1px);
+      background-size: 48px 48px;
+      animation: gridScroll 20s linear infinite;
+      pointer-events: none;
+    }
+    @keyframes gridScroll { to { background-position: 48px 48px; } }
+
+    /* ─── Layout ────────────────────────────────────────────────── */
+    .app { position: relative; z-index: 1; display: flex; flex-direction: column; min-height: 100vh; }
+
+    /* ─── Header ────────────────────────────────────────────────── */
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 32px; border-bottom: 1px solid var(--border);
+      background: rgba(13,20,34,0.8); backdrop-filter: blur(20px);
+      position: sticky; top: 0; z-index: 100;
+    }
+    .logo { display: flex; align-items: center; gap: 12px; }
+    .logo-icon {
+      width: 38px; height: 38px; border-radius: 10px;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      display: flex; align-items: center; justify-content: center; font-size: 18px;
+      box-shadow: 0 0 18px rgba(59,130,246,0.4);
+    }
+    .logo-text { font-size: 16px; font-weight: 700; letter-spacing: -0.3px; }
+    .logo-text span { color: var(--accent-blue); }
+    .logo-sub { font-size: 11px; color: var(--text-3); font-weight: 400; letter-spacing: 0.5px; }
+
+    .header-status { display: flex; align-items: center; gap: 20px; }
+    .status-pill {
+      display: flex; align-items: center; gap: 6px;
+      padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 500;
+      background: var(--bg-3); border: 1px solid var(--border);
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; animation: pulse 2s infinite; }
+    .dot-green { background: var(--safe); box-shadow: 0 0 8px var(--safe); }
+    .dot-blue { background: var(--accent-blue); box-shadow: 0 0 8px var(--accent-blue); }
+    .dot-red { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+    .dot-gray { background: var(--text-3); }
+    @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.4;} }
+
+    /* ─── Main Grid ─────────────────────────────────────────────── */
+    main { flex: 1; display: grid; grid-template-columns: 300px 1fr 280px; grid-template-rows: 1fr; gap: 0; height: calc(100vh - 61px); overflow: hidden; }
+
+    /* ─── Left Panel — Control Center ──────────────────────────── */
+    .panel-left {
+      background: var(--bg-1); border-right: 1px solid var(--border);
+      overflow-y: auto; padding: 20px 16px; display: flex; flex-direction: column; gap: 16px;
+    }
+    .panel-section-title {
+      font-size: 10px; font-weight: 600; letter-spacing: 1.2px; text-transform: uppercase;
+      color: var(--text-3); margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
+    }
+    .panel-section-title::before { content:''; flex:1; height:1px; background: var(--border); }
+
+    /* Mode Toggle */
+    .mode-toggle {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+      background: var(--bg-2); padding: 5px; border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+    .mode-btn {
+      display: flex; flex-direction: column; align-items: center; gap: 5px;
+      padding: 12px 8px; border-radius: 8px; border: none; cursor: pointer;
+      font-family: inherit; font-size: 12px; font-weight: 600; transition: var(--transition);
+      background: transparent; color: var(--text-3);
+    }
+    .mode-btn .icon { font-size: 22px; }
+    .mode-btn.active { background: var(--accent-blue); color: #fff; box-shadow: var(--glow-blue); }
+    .mode-btn:not(.active):hover { background: var(--bg-3); color: var(--text-1); }
+
+    /* Config Card */
+    .config-card {
+      background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 14px; display: flex; flex-direction: column; gap: 12px;
+    }
+    .form-group { display: flex; flex-direction: column; gap: 5px; }
+    .form-label { font-size: 11px; font-weight: 500; color: var(--text-2); }
+    .form-input, .form-select {
+      background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px;
+      color: var(--text-1); font-family: 'JetBrains Mono', monospace; font-size: 12px;
+      padding: 8px 11px; outline: none; transition: var(--transition); width: 100%;
+    }
+    .form-input:focus, .form-select:focus { border-color: var(--accent-blue); box-shadow: 0 0 0 2px rgba(59,130,246,0.15); }
+    .form-select option { background: var(--bg-2); }
+
+    /* Upload Area */
+    .upload-zone {
+      border: 2px dashed var(--border); border-radius: var(--radius); padding: 24px 16px;
+      text-align: center; cursor: pointer; transition: var(--transition);
+      background: var(--bg-2); position: relative; overflow: hidden;
+    }
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: var(--accent-blue); background: rgba(59,130,246,0.05);
+      box-shadow: var(--glow-blue);
+    }
+    .upload-zone .upload-icon { font-size: 32px; margin-bottom: 8px; display: block; }
+    .upload-zone p { font-size: 12px; color: var(--text-2); }
+    .upload-zone p strong { color: var(--accent-blue); }
+    .upload-zone input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+    .upload-filename {
+      margin-top: 6px; font-size: 11px; color: var(--safe); font-family: 'JetBrains Mono', monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: none;
+    }
+
+    /* Buttons */
+    .btn {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      padding: 11px 20px; border-radius: var(--radius-sm); border: none; cursor: pointer;
+      font-family: inherit; font-size: 13px; font-weight: 600; transition: var(--transition);
+      width: 100%; letter-spacing: 0.2px;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+      color: #fff; box-shadow: var(--glow-blue);
+    }
+    .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 0 30px rgba(59,130,246,0.4); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-danger:hover { background: #dc2626; }
+    .btn-secondary { background: var(--bg-3); color: var(--text-2); border: 1px solid var(--border); }
+    .btn-secondary:hover { color: var(--text-1); border-color: var(--border-glow); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
+    .btn .spinner {
+      width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* System Stats mini */
+    .sys-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .sys-stat {
+      background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px; text-align: center;
+    }
+    .sys-stat-val { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; color: var(--accent-cyan); }
+    .sys-stat-key { font-size: 10px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+
+    /* ─── Center — Video Monitor ────────────────────────────────── */
+    .panel-center {
+      background: #000; display: flex; flex-direction: column; position: relative; overflow: hidden;
+    }
+    .video-wrapper {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      position: relative; overflow: hidden; background: #000;
+    }
+    #video-canvas {
+      max-width: 100%; max-height: 100%; object-fit: contain;
+      display: block;
+    }
+    .video-placeholder {
+      position: absolute; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 16px;
+      color: var(--text-3); font-size: 13px;
+    }
+    .video-placeholder .big-icon { font-size: 64px; opacity: 0.3; }
+    .video-placeholder h3 { font-size: 18px; font-weight: 600; color: var(--text-2); }
+    .video-placeholder p { max-width: 280px; text-align: center; }
+
+    /* Status Banner */
+    .status-banner {
+      position: absolute; top: 12px; left: 12px; right: 12px;
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 14px; border-radius: 8px; font-size: 12px; font-weight: 600;
+      backdrop-filter: blur(12px); transition: all 0.3s ease;
+      border: 1px solid transparent; display: none;
+    }
+    .status-banner.safe {
+      background: rgba(22,101,52,0.75); border-color: rgba(34,197,94,0.4); color: #86efac;
+    }
+    .status-banner.danger {
+      background: rgba(127,29,29,0.8); border-color: rgba(239,68,68,0.5); color: #fca5a5;
+      animation: dangerPulse 1s ease-in-out infinite;
+    }
+    @keyframes dangerPulse { 0%,100%{box-shadow:0 0 0 rgba(239,68,68,0);} 50%{box-shadow:0 0 20px rgba(239,68,68,0.5);} }
+
+    /* Progress bar */
+    .progress-bar-wrap {
+      padding: 10px 16px; background: var(--bg-1); border-top: 1px solid var(--border);
+      display: none;
+    }
+    .progress-bar-track {
+      height: 4px; background: var(--bg-3); border-radius: 4px; overflow: hidden; margin-bottom: 6px;
+    }
+    .progress-bar-fill {
+      height: 100%; background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+      border-radius: 4px; transition: width 0.3s ease; width: 0%;
+    }
+    .progress-meta { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-3); font-family: 'JetBrains Mono', monospace; }
+
+    /* ─── Right Panel — Alerts ──────────────────────────────────── */
+    .panel-right {
+      background: var(--bg-1); border-left: 1px solid var(--border);
+      overflow-y: auto; padding: 16px 14px; display: flex; flex-direction: column; gap: 14px;
+    }
+
+    /* Threat Meter */
+    .threat-meter { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+    .threat-score-display {
+      text-align: center; padding: 16px 0;
+    }
+    .threat-ring {
+      width: 90px; height: 90px; border-radius: 50%; margin: 0 auto 12px;
+      display: flex; align-items: center; justify-content: center; flex-direction: column;
+      font-size: 22px; font-weight: 800; font-family: 'JetBrains Mono', monospace;
+      border: 3px solid var(--bg-3); transition: all 0.4s ease;
+      background: conic-gradient(var(--safe) 0% 0%, var(--bg-3) 0% 100%);
+    }
+    .threat-ring span { font-size: 11px; font-weight: 500; color: var(--text-3); }
+    .threat-label { font-size: 12px; font-weight: 600; color: var(--text-2); }
+
+    /* Counters */
+    .counter-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+    .counter-card {
+      background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px; text-align: center;
+    }
+    .counter-val { font-size: 20px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+    .counter-key { font-size: 10px; color: var(--text-3); text-transform: uppercase; }
+    .counter-val.danger-val { color: var(--danger); }
+    .counter-val.safe-val { color: var(--safe); }
+    .counter-val.blue-val { color: var(--accent-blue); }
+
+    /* Alert log */
+    .alert-log { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+    .alert-log-empty {
+      text-align: center; color: var(--text-3); font-size: 12px; padding: 24px 0;
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+    }
+    .alert-log-empty .icon { font-size: 28px; opacity: 0.4; }
+    .alert-item {
+      background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px; display: flex; gap: 10px; align-items: flex-start;
+      animation: slideIn 0.3s ease;
+    }
+    @keyframes slideIn { from { opacity:0; transform: translateX(10px); } to { opacity:1; transform: translateX(0); } }
+    .alert-item.crime { border-color: rgba(239,68,68,0.4); background: rgba(127,29,29,0.2); }
+    .alert-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); margin-top: 4px; flex-shrink: 0; box-shadow: 0 0 8px var(--danger); }
+    .alert-content { flex: 1; min-width: 0; }
+    .alert-title { font-size: 12px; font-weight: 600; color: var(--danger); }
+    .alert-meta { font-size: 11px; color: var(--text-3); font-family: 'JetBrains Mono', monospace; margin-top: 2px; }
+    .alert-score { font-size: 11px; font-weight: 700; color: var(--caution); background: rgba(249,115,22,0.15); padding: 1px 5px; border-radius: 4px; }
+
+    /* ─── Toast ─────────────────────────────────────────────────── */
+    .toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 999; display: flex; flex-direction: column; gap: 8px; }
+    .toast {
+      padding: 12px 18px; border-radius: 10px; font-size: 13px; font-weight: 500;
+      backdrop-filter: blur(12px); border: 1px solid var(--border);
+      background: var(--bg-card); color: var(--text-1);
+      animation: toastIn 0.3s ease; max-width: 320px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .toast.success { border-color: rgba(34,197,94,0.4); }
+    .toast.error { border-color: rgba(239,68,68,0.4); }
+    .toast.info { border-color: rgba(59,130,246,0.4); }
+    @keyframes toastIn { from{opacity:0;transform:translateY(10px);} to{opacity:1;transform:translateY(0);} }
+    @keyframes toastOut { to{opacity:0;transform:translateY(10px);} }
+
+    /* ─── Upload Progress Overlay ───────────────────────────────── */
+    .upload-progress-bar {
+      height: 3px; background: var(--bg-3); border-radius: 3px; overflow: hidden; display: none; margin-top: 6px;
+    }
+    .upload-progress-fill {
+      height: 100%; background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan));
+      width: 0%; transition: width 0.2s ease;
+    }
+
+    /* ─── Big Threat Alert Overlay ──────────────────────────────── */
+    .threat-overlay {
+      position: absolute; inset: 0; pointer-events: none;
+      border: 3px solid var(--danger);
+      box-shadow: inset 0 0 60px rgba(239,68,68,0.3);
+      opacity: 0; transition: opacity 0.3s ease; border-radius: 0;
+    }
+    .threat-overlay.active { opacity: 1; animation: threatBorder 1s ease-in-out infinite; }
+    @keyframes threatBorder { 0%,100%{opacity:0.6;} 50%{opacity:1;} }
+
+    /* ─── Responsive ────────────────────────────────────────────── */
+    @media (max-width: 1100px) {
+      main { grid-template-columns: 260px 1fr 240px; }
+    }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; height: auto; }
+      .panel-left, .panel-right { max-height: 400px; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ─── Header ─────────────────────────────────────────────────── -->
+  <header>
+    <div class="logo">
+      <div class="logo-icon">🛡️</div>
+      <div>
+        <div class="logo-text">AI Crime <span>Detection</span></div>
+        <div class="logo-sub">Real-Time Surveillance Intelligence</div>
+      </div>
+    </div>
+    <div class="header-status">
+      <div class="status-pill" id="gpu-pill">
+        <div class="status-dot dot-gray" id="gpu-dot"></div>
+        <span id="gpu-label">Loading...</span>
+      </div>
+      <div class="status-pill" id="model-pill">
+        <div class="status-dot dot-gray" id="model-dot"></div>
+        <span id="model-label">Models</span>
+      </div>
+      <div class="status-pill" id="detection-pill" style="display:none">
+        <div class="status-dot dot-red" id="det-dot"></div>
+        <span id="det-label">DETECTING</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ─── Main ───────────────────────────────────────────────────── -->
+  <main>
+
+    <!-- LEFT: Control Panel -->
+    <div class="panel-left">
+
+      <div>
+        <div class="panel-section-title">Source Mode</div>
+        <div class="mode-toggle">
+          <button class="mode-btn active" id="btn-mode-video" onclick="setMode('video')">
+            <span class="icon">🎬</span> Video File
+          </button>
+          <button class="mode-btn" id="btn-mode-live" onclick="setMode('live')">
+            <span class="icon">📡</span> Live CCTV
+          </button>
+        </div>
+      </div>
+
+      <!-- VIDEO MODE CONFIG -->
+      <div id="video-config">
+        <div class="panel-section-title">Upload Video</div>
+        <div class="upload-zone" id="upload-zone">
+          <input type="file" id="file-input" accept="video/*" onchange="handleFileSelect(event)" />
+          <span class="upload-icon">📁</span>
+          <p><strong>Click to browse</strong> or drag & drop</p>
+          <p>MP4, AVI, MKV, MOV supported</p>
+          <div class="upload-filename" id="upload-filename"></div>
+          <div class="upload-progress-bar" id="upload-progress-bar">
+            <div class="upload-progress-fill" id="upload-progress-fill"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LIVE MODE CONFIG -->
+      <div id="live-config" style="display:none;">
+        <div class="panel-section-title">CCTV / Camera Source</div>
+        <div class="config-card">
+          <div class="form-group">
+            <label class="form-label">Camera Source</label>
+            <select class="form-select" id="camera-source">
+              <option value="0">📷 Webcam (Camera 0)</option>
+              <option value="1">📷 Camera 1</option>
+              <option value="2">📷 Camera 2</option>
+              <option value="rtsp">📡 RTSP Stream (Custom URL)</option>
+            </select>
+          </div>
+          <div class="form-group" id="rtsp-group" style="display:none;">
+            <label class="form-label">RTSP / HTTP URL</label>
+            <input class="form-input" type="text" id="rtsp-url" placeholder="rtsp://192.168.1.x:554/stream" />
+          </div>
+        </div>
+      </div>
+
+      <!-- DETECTION SETTINGS -->
+      <div>
+        <div class="panel-section-title">Detection Settings</div>
+        <div class="config-card">
+          <div class="form-group">
+            <label class="form-label">Threat Threshold: <strong id="threshold-val" style="color:var(--accent-blue)">0.65</strong></label>
+            <input type="range" id="threshold-slider" min="0.3" max="0.9" step="0.05" value="0.65"
+              oninput="document.getElementById('threshold-val').textContent=parseFloat(this.value).toFixed(2)"
+              style="width:100%;accent-color:var(--accent-blue);" />
+          </div>
+        </div>
+      </div>
+
+      <!-- ACTION BUTTONS -->
+      <button class="btn btn-primary" id="btn-start" onclick="startDetection()">
+        <div class="spinner" id="start-spinner"></div>
+        <span id="start-label">▶ Start Detection</span>
+      </button>
+      <button class="btn btn-danger" id="btn-stop" onclick="stopDetection()" style="display:none;">
+        ⏹ Stop Detection
+      </button>
+
+      <!-- SYSTEM STATS -->
+      <div>
+        <div class="panel-section-title">System</div>
+        <div class="sys-stat-grid">
+          <div class="sys-stat">
+            <div class="sys-stat-val" id="stat-fps">—</div>
+            <div class="sys-stat-key">FPS</div>
+          </div>
+          <div class="sys-stat">
+            <div class="sys-stat-val" id="stat-tracks">—</div>
+            <div class="sys-stat-key">Tracks</div>
+          </div>
+          <div class="sys-stat" style="grid-column:1/-1;">
+            <div class="sys-stat-val" id="stat-gpu" style="font-size:11px;color:var(--text-2);">Checking...</div>
+            <div class="sys-stat-key">GPU</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- CENTER: Video Monitor -->
+    <div class="panel-center">
+      <div class="video-wrapper" id="video-wrapper">
+        <!-- Placeholder -->
+        <div class="video-placeholder" id="video-placeholder">
+          <div class="big-icon">🎥</div>
+          <h3>Monitor Ready</h3>
+          <p>Select a video file or connect a live CCTV feed, then press <strong>Start Detection</strong>.</p>
+        </div>
+        <!-- Feed -->
+        <img id="video-canvas" alt="Detection Feed" style="display:none;" />
+        <!-- Overlays -->
+        <div class="status-banner" id="status-banner"></div>
+        <div class="threat-overlay" id="threat-overlay"></div>
+      </div>
+      <!-- Progress Bar (video mode) -->
+      <div class="progress-bar-wrap" id="progress-wrap">
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progress-fill"></div>
+        </div>
+        <div class="progress-meta">
+          <span id="progress-frames">Frame 0 / 0</span>
+          <span id="progress-pct">0%</span>
+          <span id="progress-time">Elapsed: 0s</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Alerts Panel -->
+    <div class="panel-right">
+
+      <!-- Threat Meter -->
+      <div class="threat-meter">
+        <div class="panel-section-title" style="margin-bottom:0">Threat Level</div>
+        <div class="threat-score-display">
+          <div class="threat-ring" id="threat-ring">
+            <div id="threat-pct">0%</div>
+            <span>threat</span>
+          </div>
+          <div class="threat-label" id="threat-level-label">SYSTEM IDLE</div>
+        </div>
+      </div>
+
+      <!-- Counters -->
+      <div class="counter-row">
+        <div class="counter-card">
+          <div class="counter-val danger-val" id="cnt-incidents">0</div>
+          <div class="counter-key">Incidents</div>
+        </div>
+        <div class="counter-card">
+          <div class="counter-val safe-val" id="cnt-frames">0</div>
+          <div class="counter-key">Frames</div>
+        </div>
+        <div class="counter-card">
+          <div class="counter-val blue-val" id="cnt-tracks">0</div>
+          <div class="counter-key">Tracks</div>
+        </div>
+      </div>
+
+      <!-- Alert Log -->
+      <div>
+        <div class="panel-section-title">Incident Alerts</div>
+        <div class="alert-log" id="alert-log">
+          <div class="alert-log-empty" id="alert-empty">
+            <div class="icon">🔍</div>
+            <div>No incidents detected</div>
+            <div style="font-size:10px;">Alerts will appear here in real-time</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Session Complete Actions -->
+      <div id="session-actions" style="display:none;">
+        <div class="panel-section-title">Session Complete</div>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <a id="dl-video-link" href="#" target="_blank">
+            <button class="btn btn-secondary" id="btn-dl-video">⬇ Download Annotated Video</button>
+          </a>
+          <a id="dl-report-link" href="#" target="_blank">
+            <button class="btn btn-secondary" id="btn-dl-report">📋 Download Alert Report</button>
+          </a>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toast-container"></div>
+
+<script>
+  // ─── Socket.IO Setup ────────────────────────────────────────────
+  const socket = io();
+  let currentMode = 'video';
+  let currentSessionId = null;
+  let uploadedFilePath = null;
+  let isDetecting = false;
+  let alertCount = 0;
+  let startTs = null;
+  const MAX_ALERTS = 50;
+
+  // ─── Mode Toggle ────────────────────────────────────────────────
+  function setMode(mode) {
+    currentMode = mode;
+    document.getElementById('btn-mode-video').classList.toggle('active', mode === 'video');
+    document.getElementById('btn-mode-live').classList.toggle('active', mode === 'live');
+    document.getElementById('video-config').style.display = mode === 'video' ? 'block' : 'none';
+    document.getElementById('live-config').style.display = mode === 'live' ? 'block' : 'none';
+  }
+
+  // RTSP toggle
+  document.getElementById('camera-source').addEventListener('change', function() {
+    document.getElementById('rtsp-group').style.display = this.value === 'rtsp' ? 'block' : 'none';
+  });
+
+  // ─── File Upload ────────────────────────────────────────────────
+  async function handleFileSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const nameEl = document.getElementById('upload-filename');
+    const progressBar = document.getElementById('upload-progress-bar');
+    const progressFill = document.getElementById('upload-progress-fill');
+    nameEl.textContent = file.name;
+    nameEl.style.display = 'block';
+    progressBar.style.display = 'block';
+    progressFill.style.width = '0%';
+
+    showToast('info', `📁 Uploading ${file.name}...`);
+
+    const formData = new FormData();
+    formData.append('video', file);
+
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/upload');
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          progressFill.style.width = (e.loaded / e.total * 100) + '%';
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          const data = JSON.parse(xhr.responseText);
+          uploadedFilePath = data.filename;
+          progressFill.style.width = '100%';
+          showToast('success', `✅ Uploaded: ${file.name}`);
+          setTimeout(() => { progressBar.style.display = 'none'; }, 1500);
+        } else {
+          const err = JSON.parse(xhr.responseText);
+          showToast('error', `❌ Upload failed: ${err.error}`);
+          progressBar.style.display = 'none';
+        }
+      };
+      xhr.send(formData);
+    } catch (e) {
+      showToast('error', `❌ Upload error: ${e.message}`);
+    }
+  }
+
+  // Drag & drop
+  const uploadZone = document.getElementById('upload-zone');
+  uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+  uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+  uploadZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    uploadZone.classList.remove('drag-over');
+    const files = e.dataTransfer.files;
+    if (files.length) {
+      const input = document.getElementById('file-input');
+      const dt = new DataTransfer();
+      dt.items.add(files[0]);
+      input.files = dt.files;
+      handleFileSelect({ target: { files: [files[0]] } });
+    }
+  });
+
+  // ─── Start/Stop Detection ───────────────────────────────────────
+  function startDetection() {
+    if (isDetecting) return;
+
+    let source = '';
+    if (currentMode === 'video') {
+      if (!uploadedFilePath) {
+        showToast('error', '❌ Please upload a video file first.');
+        return;
+      }
+      source = uploadedFilePath;
+    } else {
+      const camSel = document.getElementById('camera-source').value;
+      source = camSel === 'rtsp' ? document.getElementById('rtsp-url').value.trim() : camSel;
+      if (!source) {
+        showToast('error', '❌ Please enter a camera source or RTSP URL.');
+        return;
+      }
+    }
+
+    // Reset UI
+    alertCount = 0;
+    document.getElementById('alert-log').innerHTML = `<div class="alert-log-empty" id="alert-empty"><div class="icon">🔍</div><div>No incidents detected</div></div>`;
+    document.getElementById('cnt-incidents').textContent = '0';
+    document.getElementById('cnt-frames').textContent = '0';
+    document.getElementById('cnt-tracks').textContent = '0';
+    document.getElementById('session-actions').style.display = 'none';
+    updateThreatRing(0, false);
+    startTs = Date.now();
+
+    // Show spinner
+    const startBtn = document.getElementById('btn-start');
+    document.getElementById('start-spinner').style.display = 'block';
+    document.getElementById('start-label').textContent = 'Connecting...';
+    startBtn.disabled = true;
+
+    socket.emit('start_detection', {
+      mode: currentMode,
+      source: source,
+      threshold: parseFloat(document.getElementById('threshold-slider').value)
+    });
+  }
+
+  function stopDetection() {
+    if (currentSessionId) {
+      socket.emit('stop_detection', { session_id: currentSessionId });
+    }
+    setDetectingState(false);
+    showToast('info', '⏹ Detection stopped.');
+  }
+
+  function setDetectingState(detecting) {
+    isDetecting = detecting;
+    document.getElementById('btn-start').style.display = detecting ? 'none' : 'flex';
+    document.getElementById('btn-stop').style.display = detecting ? 'flex' : 'none';
+    document.getElementById('detection-pill').style.display = detecting ? 'flex' : 'none';
+    document.getElementById('progress-wrap').style.display = detecting ? 'block' : 'none';
+
+    const startBtn = document.getElementById('btn-start');
+    document.getElementById('start-spinner').style.display = 'none';
+    document.getElementById('start-label').textContent = '▶ Start Detection';
+    startBtn.disabled = false;
+
+    if (!detecting) {
+      const banner = document.getElementById('status-banner');
+      banner.style.display = 'none';
+      document.getElementById('threat-overlay').classList.remove('active');
+    }
+  }
+
+  // ─── Socket Events ──────────────────────────────────────────────
+  socket.on('session_created', (data) => {
+    currentSessionId = data.session_id;
+    showToast('info', `📡 Session created — loading models...`);
+  });
+
+  socket.on('detection_started', (data) => {
+    setDetectingState(true);
+    document.getElementById('video-placeholder').style.display = 'none';
+    document.getElementById('video-canvas').style.display = 'block';
+    const src = data.is_live ? 'Live CCTV' : data.source.split('/').pop().split('\\').pop();
+    showToast('success', `✅ Detection started: ${src}`);
+  });
+
+  socket.on('detection_frame', (data) => {
+    if (data.session_id !== currentSessionId) return;
+
+    // Update video feed
+    const canvas = document.getElementById('video-canvas');
+    canvas.src = 'data:image/jpeg;base64,' + data.frame;
+
+    // Update progress
+    if (data.total_frames > 0) {
+      document.getElementById('progress-fill').style.width = data.progress + '%';
+      document.getElementById('progress-frames').textContent = `Frame ${data.frame_idx} / ${data.total_frames}`;
+      document.getElementById('progress-pct').textContent = data.progress + '%';
+    }
+    const elapsed = Math.round((Date.now() - startTs) / 1000);
+    document.getElementById('progress-time').textContent = `Elapsed: ${elapsed}s`;
+
+    // Update stats
+    document.getElementById('stat-fps').textContent = data.fps;
+    document.getElementById('cnt-frames').textContent = data.frame_idx;
+    document.getElementById('cnt-incidents').textContent = data.incidents_total;
+    document.getElementById('cnt-tracks').textContent = data.active_threats || 0;
+
+    // Status banner
+    const banner = document.getElementById('status-banner');
+    const overlay = document.getElementById('threat-overlay');
+    banner.style.display = 'flex';
+    if (data.has_crime) {
+      banner.className = 'status-banner danger';
+      banner.innerHTML = '🚨 ALERT: CRIME / SUSPICIOUS BEHAVIOR DETECTED';
+      overlay.classList.add('active');
+      updateThreatRing(1.0, true);
+      document.getElementById('threat-level-label').textContent = '⚠ HIGH THREAT';
+    } else {
+      banner.className = 'status-banner safe';
+      banner.innerHTML = '✅ SYSTEM ACTIVE — NO THREATS DETECTED';
+      overlay.classList.remove('active');
+      updateThreatRing(0.05, false);
+      document.getElementById('threat-level-label').textContent = 'ALL CLEAR';
+    }
+  });
+
+  socket.on('detection_complete', (data) => {
+    setDetectingState(false);
+    currentSessionId = null;
+
+    showToast('success', `✅ Complete! ${data.incidents} incidents in ${data.duration}s`);
+
+    // Show download links
+    if (data.output_video) {
+      document.getElementById('dl-video-link').href = `/outputs/${data.output_video}`;
+      document.getElementById('dl-report-link').href = `/outputs/${data.report}`;
+      document.getElementById('session-actions').style.display = 'block';
+    }
+
+    // Populate alerts
+    if (data.alerts && data.alerts.length > 0) {
+      data.alerts.forEach(a => addAlert(a));
+    }
+  });
+
+  socket.on('detection_error', (data) => {
+    showToast('error', `❌ Error: ${data.error}`);
+    setDetectingState(false);
+  });
+
+  socket.on('detection_stopped', () => {
+    setDetectingState(false);
+  });
+
+  // ─── System Status Polling ──────────────────────────────────────
+  async function loadSystemStatus() {
+    try {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      document.getElementById('stat-gpu').textContent = data.gpu;
+      document.getElementById('gpu-label').textContent = data.gpu.replace('NVIDIA ', '');
+      document.getElementById('gpu-dot').className = 'status-dot dot-green';
+      document.getElementById('model-dot').className = data.models_loaded ? 'status-dot dot-green' : 'status-dot dot-blue';
+      document.getElementById('model-label').textContent = data.models_loaded ? 'Models Ready' : 'Loading...';
+    } catch(e) {}
+  }
+
+  setInterval(loadSystemStatus, 5000);
+  loadSystemStatus();
+
+  // ─── Threat Ring Update ─────────────────────────────────────────
+  function updateThreatRing(score, isThreat) {
+    const ring = document.getElementById('threat-ring');
+    const pct = Math.round(score * 100);
+    document.getElementById('threat-pct').textContent = pct + '%';
+    const color = isThreat ? '#ef4444' : score > 0.35 ? '#f97316' : '#22c55e';
+    const deg = Math.round(score * 360);
+    ring.style.background = `conic-gradient(${color} 0deg ${deg}deg, #1a2235 ${deg}deg 360deg)`;
+    ring.style.boxShadow = isThreat ? '0 0 24px rgba(239,68,68,0.5)' : 'none';
+  }
+
+  // ─── Alert Helpers ──────────────────────────────────────────────
+  function addAlert(alert) {
+    const log = document.getElementById('alert-log');
+    const empty = document.getElementById('alert-empty');
+    if (empty) empty.remove();
+
+    alertCount++;
+    if (alertCount > MAX_ALERTS) {
+      const items = log.querySelectorAll('.alert-item');
+      if (items.length > 0) items[0].remove();
+    }
+
+    const item = document.createElement('div');
+    item.className = 'alert-item crime';
+    item.innerHTML = `
+      <div class="alert-dot"></div>
+      <div class="alert-content">
+        <div class="alert-title">🚨 Suspicious Activity</div>
+        <div class="alert-meta">
+          ⏱ ${alert.timestamp || '--:--'} &nbsp;|&nbsp; Track ID: ${alert.track_id}
+        </div>
+        <div class="alert-score">Threat: ${Math.round(alert.threat_score * 100)}%</div>
+      </div>`;
+    log.appendChild(item);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // ─── Toast ──────────────────────────────────────────────────────
+  function showToast(type, msg) {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = msg;
+    container.appendChild(toast);
+    setTimeout(() => {
+      toast.style.animation = 'toastOut 0.3s ease forwards';
+      setTimeout(() => toast.remove(), 300);
+    }, 3500);
+  }
+</script>
+</body>
+</html>

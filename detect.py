@@ -192,8 +192,14 @@ def run_detection(args):
     # Tracking state & threat scoring buffers
     track_buffers = {}
     track_frame_counts = {}
-    track_threat_scores = {}
+    track_threat_scores = {}      # EMA smoothed score per track
+    track_consec_high = {}        # consecutive high-score evaluations per track
+    track_last_alert_frame = {}   # last frame an incident was logged per track
     incident_alerts = []
+    # Consecutive evaluations required to flag a real threat (avoids single-frame spikes)
+    CONSEC_REQUIRED = 3
+    # Frames between allowed alert logs per track (prevents 386 alerts in 316 frames)
+    ALERT_COOLDOWN_FRAMES = 90
 
     frame_idx = 0
     start_time = time.time()
@@ -243,7 +249,7 @@ def run_detection(args):
 
                 # Clamp bounding box
                 x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(width - 1, x2), min(height - 1)
+                x2, y2 = min(width - 1, x2), min(height - 1, y2)
 
                 if x2 <= x1 or y2 <= y1:
                     continue
@@ -252,12 +258,18 @@ def run_detection(args):
                     track_buffers[track_id] = collections.deque(maxlen=16)
                     track_frame_counts[track_id] = 0
                     track_threat_scores[track_id] = 0.0
+                    track_consec_high[track_id] = 0
+                    track_last_alert_frame[track_id] = -999
 
                 track_frame_counts[track_id] += 1
 
-                # Subsample frames using temporal stride
+                # Subsample frames using temporal stride with context padding
                 if track_frame_counts[track_id] % args.frame_stride == 0:
-                    crop = frame[y1:y2, x1:x2]
+                    pad_x = int((x2 - x1) * 0.2)
+                    pad_y = int((y2 - y1) * 0.2)
+                    cx1, cy1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+                    cx2, cy2 = min(width - 1, x2 + pad_x), min(height - 1, y2 + pad_y)
+                    crop = frame[cy1:cy2, cx1:cx2]
                     if crop.size > 0:
                         crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
                         crop_resized = cv2.resize(crop_rgb, (112, 112))
@@ -272,21 +284,43 @@ def run_detection(args):
                     clip_tensor = clip_tensor.unsqueeze(0) # (1, 3, 16, 112, 112)
                     with torch.no_grad():
                         threat_prob = classifier(clip_tensor).item()
+
+                    prev_score = track_threat_scores.get(track_id, 0.0)
+                    # Asymmetric EMA: conservative rising (0.25 weight), faster decay (0.40 weight)
+                    if prev_score > 0:
+                        if threat_prob > prev_score:
+                            track_threat_scores[track_id] = 0.75 * prev_score + 0.25 * threat_prob
+                        else:
+                            track_threat_scores[track_id] = 0.60 * prev_score + 0.40 * threat_prob
+                    else:
                         track_threat_scores[track_id] = threat_prob
 
+                    # Track consecutive high evaluations
+                    if track_threat_scores[track_id] >= args.threshold:
+                        track_consec_high[track_id] = track_consec_high.get(track_id, 0) + 1
+                    else:
+                        track_consec_high[track_id] = 0  # reset streak on drop
+
                 score = track_threat_scores.get(track_id, 0.0)
-                is_threat = score >= args.threshold
+                consec = track_consec_high.get(track_id, 0)
+
+                # Require 3 consecutive high evaluations to confirm a real threat
+                is_threat = (score >= args.threshold) and (consec >= CONSEC_REQUIRED)
 
                 if is_threat:
                     active_threat_count += 1
                     current_frame_has_crime = True
-                    timestamp_str = f"{int(frame_idx / fps // 60):02d}:{int(frame_idx / fps % 60):02d}"
-                    incident_alerts.append({
-                        "frame": frame_idx,
-                        "timestamp": timestamp_str,
-                        "track_id": str(track_id),
-                        "threat_score": round(score, 4)
-                    })
+                    # Only log once per ALERT_COOLDOWN_FRAMES per track (no spam)
+                    last_alert = track_last_alert_frame.get(track_id, -999)
+                    if (frame_idx - last_alert) >= ALERT_COOLDOWN_FRAMES:
+                        timestamp_str = f"{int(frame_idx / fps // 60):02d}:{int(frame_idx / fps % 60):02d}"
+                        incident_alerts.append({
+                            "frame": frame_idx,
+                            "timestamp": timestamp_str,
+                            "track_id": str(track_id),
+                            "threat_score": round(score, 4)
+                        })
+                        track_last_alert_frame[track_id] = frame_idx
 
                 # Determine visuals based on threat score
                 if is_threat:
@@ -395,7 +429,7 @@ def parse_arguments():
         description="AI Crime Detection System - End-to-End Inference Engine",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--input", type=str, default="",
+    parser.add_argument("--input", "--source", dest="input", type=str, default="",
                         help="Path to input video (.mp4, .avi, etc.), camera index (0), or RTSP url. If omitted, checks 'inputs/' directory.")
     parser.add_argument("--output", type=str, default="",
                         help="Specific destination path for annotated output video. Default saves to outputs/detected_<name>.mp4.")
@@ -405,8 +439,8 @@ def parse_arguments():
                         help="Path to fine-tuned 3D-CNN weights file. Checks weights/best_crime_detector.pth by default.")
     parser.add_argument("--yolo-model", type=str, default="yolov8n.pt",
                         help="YOLO model path or weight file.")
-    parser.add_argument("--threshold", type=float, default=0.2,
-                        help="Anomaly/crime probability threshold to trigger high alert.")
+    parser.add_argument("--threshold", type=float, default=0.65,
+                        help="Anomaly/crime probability threshold (0.65 default reduces false positives).")
     parser.add_argument("--conf-thresh", type=float, default=0.5,
                         help="Confidence threshold for human detection.")
     parser.add_argument("--frame-stride", type=int, default=2,

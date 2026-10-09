@@ -71,22 +71,31 @@ class VideoClipDataset(Dataset):
         do_flip = self.is_train and (random.random() > 0.5)
         frames = []
 
+        last_raw_frame = None
         for step in range(self.seq_len):
             ret, frame = cap.read()
             if not ret or frame is None:
-                # If reading beyond EOF, pad with last frame or black
-                frame = frames[-1] if frames else np.zeros((self.img_size[1], self.img_size[0], 3), dtype=np.uint8)
+                if last_raw_frame is not None:
+                    frame = last_raw_frame.copy()
+                else:
+                    frame = np.zeros((self.img_size[1], self.img_size[0], 3), dtype=np.uint8)
             else:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frame = cv2.resize(frame, self.img_size)
+                last_raw_frame = frame
 
             if do_flip:
                 frame = cv2.flip(frame, 1)
 
-            # Skip forward if stride > 1
+            # Skip forward if stride > 1 (cap.grab is 2-3x faster than cap.set)
             if stride > 1 and step < self.seq_len - 1:
-                current_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-                cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos + stride - 1)
+                if stride <= 4:
+                    for _ in range(stride - 1):
+                        if not cap.grab():
+                            break
+                else:
+                    current_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos + stride - 1)
 
             # Normalize
             norm = (frame.astype(np.float32) / 255.0 - self.mean) / self.std
@@ -138,7 +147,8 @@ class FrameSequenceDataset(Dataset):
         return torch.tensor(seq_tensor, dtype=torch.float32), torch.tensor(label, dtype=torch.float32)
 
 
-def discover_dataset(dataset_dir, seq_len=16, stride=32, clip_sample_stride=2, max_clips_per_video=None):
+def discover_dataset(dataset_dir, seq_len=16, stride=32, clip_sample_stride=2, max_clips_per_video=None,
+                     include_subdirs=None, exclude_subdirs=None):
     """
     Intelligently inspects the dataset folder and auto-detects format:
     1. Raw video files (.mp4, .avi)
@@ -155,6 +165,16 @@ def discover_dataset(dataset_dir, seq_len=16, stride=32, clip_sample_stride=2, m
     sample_videos = []
     for ext in video_exts:
         sample_videos.extend(glob.glob(os.path.join(dataset_dir, "**", ext), recursive=True))
+
+    if include_subdirs:
+        norm_inc = [s.lower() for s in include_subdirs]
+        sample_videos = [v for v in sample_videos if any(inc in os.path.relpath(v, dataset_dir).lower() for inc in norm_inc)]
+        print(f"[DATASET] Filtered to include only subdirectories {include_subdirs} ({len(sample_videos)} videos matched).")
+
+    if exclude_subdirs:
+        norm_exc = [s.lower() for s in exclude_subdirs]
+        sample_videos = [v for v in sample_videos if not any(exc in os.path.relpath(v, dataset_dir).lower() for exc in norm_exc)]
+        print(f"[DATASET] Filtered to exclude subdirectories {exclude_subdirs} ({len(sample_videos)} videos remaining).")
 
     if len(sample_videos) > 0:
         print(f"[DATASET] Detected raw video dataset mode ({len(sample_videos)} video files found).")
@@ -174,8 +194,7 @@ def parse_video_dataset(dataset_dir, video_files, seq_len, stride, clip_sample_s
     print(f"[DATASET] Indexing {len(video_files)} video files...")
     for idx, video_path in enumerate(video_files):
         rel_path = os.path.relpath(video_path, dataset_dir)
-        category = rel_path.split(os.sep)[0].lower()
-        is_normal = ("normal" in category)
+        is_normal = ("normal" in rel_path.lower())
         label = 0.0 if is_normal else 1.0
         video_id = os.path.splitext(os.path.basename(video_path))[0]
 
@@ -310,6 +329,14 @@ def train():
                         help="Directory to save model checkpoints.")
     parser.add_argument("--resume", type=str, default="",
                         help="Path to checkpoint to resume training from.")
+    parser.add_argument("--finetune", action="store_true",
+                        help="Fine-tune mode: reset epochs and optimizer to train on new dataset distribution.")
+    parser.add_argument("--include-subdirs", nargs="+", default=None,
+                        help="Only include videos from these subdirectories under dataset-dir.")
+    parser.add_argument("--exclude-subdirs", nargs="+", default=None,
+                        help="Exclude videos from these subdirectories under dataset-dir.")
+    parser.add_argument("--balanced-loss", action="store_true", default=True,
+                        help="Use class-weighted BCE loss to balance Normal vs Crime gradients.")
     parser.add_argument("--no-amp", action="store_true",
                         help="Disable Automatic Mixed Precision (AMP). By default, AMP is enabled on CUDA.")
     args = parser.parse_args()
@@ -333,6 +360,10 @@ def train():
     print(f"  Batch Size:          {args.batch_size}")
     print(f"  Epochs:              {args.epochs}")
     print(f"  DataLoader Workers:  {args.num_workers}")
+    if args.include_subdirs:
+        print(f"  Include Subdirs:     {args.include_subdirs}")
+    if args.exclude_subdirs:
+        print(f"  Exclude Subdirs:     {args.exclude_subdirs}")
     print("=" * 65)
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -346,32 +377,55 @@ def train():
         seq_len=args.seq_len,
         stride=args.stride,
         clip_sample_stride=args.clip_sample_stride,
-        max_clips_per_video=max_clips
+        max_clips_per_video=max_clips,
+        include_subdirs=args.include_subdirs,
+        exclude_subdirs=args.exclude_subdirs
     )
 
-    video_ids = list(video_dict.keys())
-    random.shuffle(video_ids)
-    num_val = int(len(video_ids) * args.val_split)
-    val_vids = set(video_ids[:num_val])
-    train_vids = set(video_ids[num_val:])
+    # Stratified video-level train/validation split
+    crime_vids = []
+    normal_vids = []
+    for vid, entries in video_dict.items():
+        sample_label = entries[0][3] if dataset_mode == "video" else entries[0][1]
+        if sample_label == 1.0:
+            crime_vids.append(vid)
+        else:
+            normal_vids.append(vid)
+
+    random.shuffle(crime_vids)
+    random.shuffle(normal_vids)
+
+    num_val_crime = int(len(crime_vids) * args.val_split)
+    num_val_normal = int(len(normal_vids) * args.val_split)
+
+    val_vids = set(crime_vids[:num_val_crime] + normal_vids[:num_val_normal])
+    train_vids = set(crime_vids[num_val_crime:] + normal_vids[num_val_normal:])
 
     train_entries = []
     val_entries = []
 
-    for vid in video_ids:
+    for vid in list(video_dict.keys()):
         entries = video_dict[vid]
         target = val_entries if vid in val_vids else train_entries
         for e in entries:
-            # Tuple formats:
-            # Video mode: (video_path, start_frame, stride, label, vid) -> need (path, start, stride, label)
-            # Frame mode: (paths, label, vid) -> need (paths, label)
             if dataset_mode == "video":
                 target.append((e[0], e[1], e[2], e[3]))
             else:
                 target.append((e[0], e[1]))
 
-    print(f"\n[SPLIT] Training Set:   {len(train_vids)} videos | {len(train_entries)} clips")
-    print(f"[SPLIT] Validation Set: {len(val_vids)} videos | {len(val_entries)} clips")
+    print(f"\n[SPLIT] Training Set:   {len(train_vids)} videos ({len(crime_vids)-num_val_crime} crime, {len(normal_vids)-num_val_normal} normal) | {len(train_entries)} clips")
+    print(f"[SPLIT] Validation Set: {len(val_vids)} videos ({num_val_crime} crime, {num_val_normal} normal) | {len(val_entries)} clips")
+
+    total_train_clips = len(train_entries)
+    crime_train_clips = sum(1 for e in train_entries if (e[3] if dataset_mode == "video" else e[1]) == 1.0)
+    normal_train_clips = total_train_clips - crime_train_clips
+
+    if normal_train_clips > 0 and crime_train_clips > 0 and args.balanced_loss:
+        w_crime = total_train_clips / (2.0 * crime_train_clips)
+        w_normal = total_train_clips / (2.0 * normal_train_clips)
+        print(f"[CLASS WEIGHTS] Balanced BCE Loss active: Normal={w_normal:.2f}x, Crime={w_crime:.2f}x")
+    else:
+        w_crime, w_normal = 1.0, 1.0
 
     if dataset_mode == "video":
         train_ds = VideoClipDataset(train_entries, seq_len=args.seq_len, is_train=True)
@@ -416,11 +470,24 @@ def train():
         print(f"[RESUME] Loading checkpoint from '{args.resume}'...")
         ckpt = torch.load(args.resume, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'])
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        start_epoch = ckpt.get('epoch', 0) + 1
-        best_val_loss = ckpt.get('val_loss', float('inf'))
-        best_val_acc = ckpt.get('val_acc', 0.0)
-        print(f"[RESUME] Resuming from Epoch {start_epoch} (Best Val Loss: {best_val_loss:.4f})")
+        
+        is_finetune = args.finetune or (ckpt.get('epoch', 0) >= args.epochs) or (ckpt.get('val_loss', 1.0) < 1e-4)
+        if is_finetune:
+            print(f"[FINE-TUNE] Initialized weights from '{args.resume}'.")
+            print(f"[FINE-TUNE] Starting fresh fine-tuning: Epoch 1 to {args.epochs} with lr={args.lr}.")
+            start_epoch = 1
+            best_val_loss = float('inf')
+            best_val_acc = 0.0
+        else:
+            if 'optimizer_state_dict' in ckpt:
+                try:
+                    optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                except Exception:
+                    pass
+            start_epoch = ckpt.get('epoch', 0) + 1
+            best_val_loss = ckpt.get('val_loss', float('inf'))
+            best_val_acc = ckpt.get('val_acc', 0.0)
+            print(f"[RESUME] Resuming from Epoch {start_epoch} (Best Val Loss: {best_val_loss:.4f})")
 
     # 4. Training Loop
     print("\n" + "=" * 65)
@@ -451,7 +518,12 @@ def train():
 
             # Compute BCELoss in FP32 outside autocast to prevent float16 underflow/overflow
             outputs = torch.clamp(outputs.float(), 1e-7, 1.0 - 1e-7)
-            loss = criterion(outputs, targets)
+            if args.balanced_loss and (w_crime != 1.0 or w_normal != 1.0):
+                sample_weights = targets * w_crime + (1.0 - targets) * w_normal
+                loss_unreduced = nn.functional.binary_cross_entropy(outputs, targets, reduction='none')
+                loss = (loss_unreduced * sample_weights).mean()
+            else:
+                loss = criterion(outputs, targets)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)

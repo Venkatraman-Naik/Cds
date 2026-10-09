@@ -42,15 +42,37 @@ def inspect_dataset(dataset_dir):
 
     if len(video_files) > 0:
         print(f"\n[INFO] Found {len(video_files)} video files.")
+        sub_category_counts = defaultdict(int)
         for v in video_files:
             rel = os.path.relpath(v, dataset_dir)
-            cat = rel.split(os.sep)[0]
+            parts = rel.split(os.sep)
+            cat = parts[0]
             category_counts[cat] += 1
+            if len(parts) > 2 and parts[-2] != cat:
+                sub_category_counts[parts[-2]] += 1
+            elif "normal" not in cat.lower():
+                sub_category_counts[cat] += 1
 
-        print("\n  Class Breakdown (Videos):")
+        print("\n  Top-Level Dataset Folders:")
+        total_normal, total_crime = 0, 0
         for cat, cnt in sorted(category_counts.items()):
-            label_type = "NORMAL (0)" if "normal" in cat.lower() else "CRIME (1)"
-            print(f"   - {cat:<25}: {cnt:>5} videos  [{label_type}]")
+            is_norm = "normal" in cat.lower()
+            label_type = "NORMAL (0)" if is_norm else "CRIME (1)"
+            if is_norm:
+                total_normal += cnt
+            else:
+                total_crime += cnt
+            print(f"   - {cat:<36}: {cnt:>5} videos  [{label_type}]")
+
+        print(f"\n  Summary Totals:")
+        print(f"   * Crime Videos  (Label 1.0): {total_crime:>5} videos")
+        print(f"   * Normal Videos (Label 0.0): {total_normal:>5} videos")
+        print(f"   * Total Dataset Size        : {total_crime + total_normal:>5} videos")
+
+        if sub_category_counts:
+            print("\n  Crime / Anomaly Specific Sub-Categories Detected:")
+            for subcat, cnt in sorted(sub_category_counts.items()):
+                print(f"   - {subcat:<25}: {cnt:>4} videos")
 
         # Test video decode on first 3 videos
         print("\n[INFO] Testing video codec decoding...")

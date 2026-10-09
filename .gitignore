@@ -24,3 +24,14 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+
+# Temporary and run outputs
+outputs/
+uploads/
+inputs/
+*.jpg
+*.jpeg
+*.png
+scripts/test_*.py
+scripts/validate_detector.py
+scripts/verify_all_videos.py
